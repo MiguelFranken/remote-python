@@ -1,5 +1,5 @@
 import pandas as pd
-from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
+from sklearn.preprocessing import OrdinalEncoder, RobustScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.dummy import DummyClassifier
 from sklearn.metrics import precision_recall_curve, auc, roc_auc_score, f1_score, make_scorer, classification_report
@@ -10,12 +10,13 @@ random_state = 358025
 # Load classification dataset
 df = pd.read_csv('flights_classifying.csv', index_col=0)
 df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-df = df.dropna() # drop null rows
-df = df[df['CANCELLED'] == 0] # ignore cancelled flights
-df = df.sample(frac=1, random_state=random_state) # randomly order data points
+df = df.dropna()  # drop null rows
+df = df[df['CANCELLED'] == 0]  # ignore cancelled flights
+df = df.sample(frac=1, random_state=random_state)  # randomly order data points
 
 # Target feature
 y = df["REIMBURSMENT"]
+
 
 # Transform SCHEDULED_DEPARTURE_CATEGORY with OrdninalEncoder as Morning < Afternoon < Evening < Night
 def transform_scheduled_departure_category(df):
@@ -31,9 +32,11 @@ X = transform_scheduled_departure_category(X)
 
 # drop non-descriptive features
 non_descriptive_features = [
-    'YEAR', 'DAY',
+    #'YEAR',
+    'DAY',
     'DAY_YEARLY',
-    'SCHEDULED_TIME', 'WEEK',
+    'SCHEDULED_TIME',
+    #'WEEK',
     'TAIL_NUMBER', 'FLIGHT_NUMBER',  # Unique identifiers
     'WHEELS_ON', 'WHEELS_OFF',
     'TAXI_IN', 'TAXI_OUT',
@@ -48,20 +51,18 @@ non_descriptive_features = [
     'REIMBURSMENT',
     'DEPARTURE_TIME', 'ARRIVAL_TIME', 'ELAPSED_TIME',
 
-    'DISTANCE', 'SCHEDULED_ARRIVAL',
+    #'DISTANCE',
+    'SCHEDULED_ARRIVAL',
+    'DESTINATION_AIRPORT', 'ORIGIN_AIRPORT'
 ]
 X.drop(non_descriptive_features, axis=1, inplace=True)
 
 # one-hot encoding of categorical features
 X = pd.get_dummies(X, columns=[
     "AIRLINE",
-    "ORIGIN_AIRPORT",
-    "DESTINATION_AIRPORT"
+    # "ORIGIN_AIRPORT",
+    # "DESTINATION_AIRPORT"
 ])
-
-# scaling
-ft = MinMaxScaler().fit_transform(X)
-X = pd.DataFrame(ft, columns=X.columns, index=X.index)
 
 X_train, X_test, y_train, y_test = train_test_split(
     X, y,
@@ -70,13 +71,23 @@ X_train, X_test, y_train, y_test = train_test_split(
     stratify=y
 )
 
+print("Descriptive features:")
+print(X_train.columns)
+
+# scaling
+scaler = RobustScaler().fit(X_train)
+X_train = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns, index=X_train.index)
+X_test = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+
 # either "pr_auc", "f1_macro" or "roc_auc"
 scoring = "pr_auc"
+
 
 # precision-recall AUC scorer
 def pr_auc_scorer(y_true, pos_probs):
     precision, recall, _ = precision_recall_curve(y_true, pos_probs)
     return auc(recall, precision)
+
 
 # no skill model, stratified random class predictions, f1_macro scoring
 def baseline_f1_macro():
@@ -143,10 +154,16 @@ X_train_10000, _, y_train_10000, _ = train_test_split(
 tuned_parameters = [
     {
         "kernel": ["linear"],
-        "C": [0.01, 0.1],
-        "class_weight": [{1: 100}, 'balanced']
-        # balanced might be beneficial for inbalanced data. see documentation of grid search..
-    }
+        "C": [0.001, 0.01],
+        "class_weight": ['balanced']
+    },
+    {
+        "kernel": ["rbf", "sigmoid", "poly"],
+        "C": [0.001, 0.01, 1, 10],
+        "degree": [3, 5, 7, 9],
+        "class_weight": ['balanced'],
+        "gamma": ['scale', 'auto', 1e-2, 1e-3, 1e-4]
+    },
 ]
 
 print("# Tuning hyper-parameters")
@@ -161,7 +178,7 @@ if scoring == "f1_macro":
         scoring="f1_macro",
         cv=2,
         n_jobs=-1,  # for parallel computation
-        verbose = 3
+        verbose=3
     )
 elif scoring == "roc_auc":
     print("Using ROC_AUC scoring..")
@@ -171,7 +188,7 @@ elif scoring == "roc_auc":
         scoring="roc_auc",
         n_jobs=-1,
         cv=2,
-        verbose = 3
+        verbose=3
     )
 elif scoring == "pr_auc":
     print("Using PR_AUC scoring..")
@@ -184,15 +201,12 @@ elif scoring == "pr_auc":
         scoring=make_scorer(pr_auc_scorer, needs_proba=True),
         # needs_proba to pass the computed probabilities to the scorer
         n_jobs=-1,
-        verbose = 3,
-        cv=2,
+        # verbose=3,
+        cv=4,
     )
 
 clf.fit(X_train_10000, y_train_10000)
 
-## Print a detailed report
-## The first value of each row (left-most row value) shows the score (either f1_macro, roc auc or pr auc)
-## You do not really need to understand the following lines of code. It's just a report.
 print("Best parameters set found on train set:")
 print()
 print(clf.best_params_)
@@ -205,8 +219,8 @@ for mean, std, params in zip(means, stds, clf.cv_results_["params"]):
     print("%0.3f (+/-%0.03f) for %r" % (mean, std * 2, params))
 print()
 
-X_test_fraction = X_test[:10000]
-y_test_fraction = y_test[:10000]
+X_test_fraction = X_test
+y_test_fraction = y_test
 
 # prediction
 y_pred = clf.best_estimator_.predict(X_test_fraction)
