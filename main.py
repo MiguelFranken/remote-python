@@ -1,11 +1,9 @@
-import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.dummy import DummyClassifier
-from sklearn.metrics import f1_score
-from sklearn.metrics import auc, roc_auc_score
-from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import precision_recall_curve, auc, roc_auc_score, f1_score, make_scorer, classification_report
+from sklearn.svm import SVC
 
 random_state = 358025
 
@@ -19,10 +17,7 @@ df = df.sample(frac=1, random_state=random_state) # randomly order data points
 # Target feature
 y = df["REIMBURSMENT"]
 
-## Descriptive features
-
-
-## Transform SCHEDULED_DEPARTURE_CATEGORY with OrdninalEncoder as Morning < Afternoon < Evening < Night
+# Transform SCHEDULED_DEPARTURE_CATEGORY with OrdninalEncoder as Morning < Afternoon < Evening < Night
 def transform_scheduled_departure_category(df):
     df_ordinal = df.copy()
     categories = [['Morning', 'Afternoon', 'Evening', 'Night']]
@@ -35,7 +30,6 @@ X = df.copy()
 X = transform_scheduled_departure_category(X)
 
 # drop non-descriptive features
-## all these are deleted
 non_descriptive_features = [
     'YEAR', 'DAY',
     'DAY_YEARLY',
@@ -79,40 +73,12 @@ X_train, X_test, y_train, y_test = train_test_split(
 # either "pr_auc", "f1_macro" or "roc_auc"
 scoring = "pr_auc"
 
-# Precision-Recall AUC scorer
-# Note: We only need to specify a custom method for PR AUC
-#       as the other scoring alternatives can be specified by using a scoring string.
-#       See below when model is specified and see https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
+# precision-recall AUC scorer
 def pr_auc_scorer(y_true, pos_probs):
     precision, recall, _ = precision_recall_curve(y_true, pos_probs)
     return auc(recall, precision)
 
-
-## Sources:
-## https://towardsdatascience.com/calculating-a-baseline-accuracy-for-a-classification-model-a4b342ceb88f
-## https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html
-## https://scikit-learn.org/stable/modules/model_evaluation.html#dummy-estimators
-
-## DummyClassifier
-##
-## Simple baseline to compare with other (real) classifiers
-## Generates predictions by random guessing but respecting the training set’s class distribution
-## Note that with all DummyClassifier strategies, the predict method completely ignores the input data!
-
-## Alternative:
-## - DummyRegressor
-##   See https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyRegressor.html#sklearn.dummy.DummyRegressor
-
-## Note:
-## For the f1_macro baseline model we could use cross-validation.
-## This would be a TODO if we decide to use this metric.
-
-## Open Questions:
-## - Should we choose f1_macro, roc auc or pr_auc?
-## - Which strategy for the DummyClassifier?
-
-## no skill model, stratified random class predictions, f1_macro scoring
-# f1_micro (majority = undelayed flights), f1_macro (minority = delayed flights)
+# no skill model, stratified random class predictions, f1_macro scoring
 def baseline_f1_macro():
     clf = DummyClassifier(
         strategy="stratified",
@@ -127,7 +93,7 @@ def baseline_f1_macro():
     return score
 
 
-## no skill model, stratified random class predictions, roc auc scoring
+# no skill model, stratified random class predictions, roc auc scoring
 def baseline_roc_auc():
     # fit
     baseline_clf = DummyClassifier(
@@ -145,8 +111,7 @@ def baseline_roc_auc():
     return score
 
 
-## no skill model, stratified random class predictions, pr_auc scoring
-## Precision/Recall Curve AUC
+# no skill model, stratified random class predictions, pr_auc scoring
 def baseline_pr_auc():
     # no skill model, stratified random class predictions
     baseline_clf = DummyClassifier(
@@ -167,3 +132,99 @@ def baseline_pr_auc():
 baseline_f1_score = baseline_f1_macro()
 baseline_roc_auc_score = baseline_roc_auc()
 baseline_pr_auc_score = baseline_pr_auc()
+
+X_train_10000, _, y_train_10000, _ = train_test_split(
+    X_train, y_train,
+    train_size=10000,
+    random_state=random_state,
+    stratify=y_train
+)
+
+tuned_parameters = [
+    {
+        "kernel": ["linear"],
+        "C": [0.01, 0.1],
+        "class_weight": [{1: 100}, 'balanced']
+        # balanced might be beneficial for inbalanced data. see documentation of grid search..
+    }
+]
+
+print("# Tuning hyper-parameters")
+print()
+
+## here we choose the scoring method that can be specified by the scoring variable
+if scoring == "f1_macro":
+    print("Using f1_macro scoring..")
+    clf = GridSearchCV(
+        SVC(),  # Support Vector Machine (SVC)
+        tuned_parameters,  # For each candidate specified by tuned_parameters a model is fitted and compared.
+        scoring="f1_macro",
+        cv=2,
+        n_jobs=-1,  # for parallel computation
+        verbose = 3
+    )
+elif scoring == "roc_auc":
+    print("Using ROC_AUC scoring..")
+    clf = GridSearchCV(
+        SVC(),
+        tuned_parameters,
+        scoring="roc_auc",
+        n_jobs=-1,
+        cv=2,
+        verbose = 3
+    )
+elif scoring == "pr_auc":
+    print("Using PR_AUC scoring..")
+    clf = GridSearchCV(
+        SVC(
+            probability=True,  # PR AUC needs the probabilities. Google when necessary.
+            random_state=random_state  # To make calculating the probabilities deterministic
+        ),
+        tuned_parameters,
+        scoring=make_scorer(pr_auc_scorer, needs_proba=True),
+        # needs_proba to pass the computed probabilities to the scorer
+        n_jobs=-1,
+        verbose = 3,
+        cv=2,
+    )
+
+clf.fit(X_train_10000, y_train_10000)
+
+## Print a detailed report
+## The first value of each row (left-most row value) shows the score (either f1_macro, roc auc or pr auc)
+## You do not really need to understand the following lines of code. It's just a report.
+print("Best parameters set found on train set:")
+print()
+print(clf.best_params_)
+print()
+print(f"Grid scores ({scoring}) on train set:")
+print()
+means = clf.cv_results_["mean_test_score"]
+stds = clf.cv_results_["std_test_score"]
+for mean, std, params in zip(means, stds, clf.cv_results_["params"]):
+    print("%0.3f (+/-%0.03f) for %r" % (mean, std * 2, params))
+print()
+
+X_test_fraction = X_test[:10000]
+y_test_fraction = y_test[:10000]
+
+# prediction
+y_pred = clf.best_estimator_.predict(X_test_fraction)
+y_pred_proba = clf.best_estimator_.predict_proba(X_test_fraction)
+
+# calculate scores
+svm_pr_auc_score = pr_auc_scorer(y_test_fraction, y_pred_proba[:, 1])
+svm_roc_auc_score = roc_auc_score(y_test_fraction, y_pred_proba[:, 1])
+svm_f1_score = f1_score(y_test_fraction, y_pred, average='macro')
+
+print("Final evaluation report on test set:")
+print()
+print(classification_report(y_test_fraction, y_pred))
+print()
+print('SVM PR AUC score on test set: %.3f' % svm_pr_auc_score)
+print('SVM ROC AUC score on test set: %.3f' % svm_roc_auc_score)
+print('SVM f1_macro score on test set: %.3f' % svm_f1_score)
+print()
+print('PR AUC score difference to baseline on test set: %.3f' % (svm_pr_auc_score - baseline_pr_auc_score))
+print('ROC AUC score difference to baseline on test set: %.3f' % (svm_roc_auc_score - baseline_roc_auc_score))
+print('f1_macro score difference to baseline on test set: %.3f' % (svm_f1_score - baseline_f1_score))
